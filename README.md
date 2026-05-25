@@ -70,11 +70,27 @@ app's audio is captured, so notification sounds and other apps are excluded.
 | `App.swift` | Bootstraps an `.accessory` (menu-bar-only) `NSApplication`. |
 | `build.sh` | Compiles via SwiftPM and wraps the binary in a signed `.app`. |
 
+## Code signing & permission persistence
+
+macOS matches the Screen Recording grant against the app's code-signing
+*designated requirement*. An **ad-hoc** signature's requirement is the binary's
+`cdhash`, which changes on every build — so the grant is forgotten after each
+`./build.sh`. To avoid that, `build.sh` signs with a **stable identity**:
+
+1. `$SIGN_IDENTITY` if you set it, else
+2. the first **Apple Development** identity in your keychain, else
+3. ad-hoc (with a warning — permission will need re-granting each build).
+
+With a stable identity the requirement is constant (`identifier … and anchor
+apple generic and certificate leaf …`), so you grant Screen Recording **once**
+and it persists across rebuilds.
+
+> Switching signing identity changes the requirement once, so re-grant after the
+> switch. To wipe stale grants for a clean slate:
+> `tccutil reset ScreenCapture com.matthewroberts.applicationaudiorec`
+
 ## Notes & limitations
 
-- **Re-granting permission after a rebuild:** ad-hoc-signed dev builds change
-  identity when the binary changes, so macOS may ask for Screen Recording
-  permission again after `./build.sh`. A real Developer ID signature avoids this.
 - ffmpeg is located at `/opt/homebrew/bin`, `/usr/local/bin`, or `/usr/bin`
   (a Finder-launched app doesn't inherit your shell `PATH`).
 - Output is fixed at 48 kHz stereo, matching the capture configuration.
