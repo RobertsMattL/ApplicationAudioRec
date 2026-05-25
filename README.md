@@ -55,7 +55,10 @@ app's audio is captured, so notification sounds and other apps are excluded.
 - Transport controls: previous / play-pause / next (auto-advances at end of
   track; *previous* restarts the current track if you're more than 3s in).
 - A seek slider with elapsed / total time, plus a volume slider.
-- **Refresh** rescans the folder; **Show in Finder** reveals the current file.
+- **Rename** a recording (renames the file on disk) and **Delete** it (moves it
+  to the Trash, so it's recoverable) — via the footer buttons, the right-click
+  context menu, or the Delete key.
+- **Refresh** rescans the folder; **Show in Finder** reveals the selected file.
 
 ## How it works
 
@@ -63,7 +66,7 @@ app's audio is captured, so notification sounds and other apps are excluded.
 |-------|------|
 | `AudioRecorder.swift` | Builds a per-app `SCContentFilter`, runs an `SCStream` with `capturesAudio`, converts each CoreMedia buffer to interleaved Float32, and writes it to `ffmpeg`'s stdin. |
 | `AppDelegate.swift` | Menu-bar UI, settings persistence, timer, permission/error alerts. |
-| `PlayerWindowController.swift` | The playback window: track list, transport, seek/volume sliders. |
+| `PlayerWindowController.swift` | The playback window: track list, transport, seek/volume sliders, rename/delete. |
 | `App.swift` | Bootstraps an `.accessory` (menu-bar-only) `NSApplication`. |
 | `build.sh` | Compiles via SwiftPM and wraps the binary in a signed `.app`. |
 

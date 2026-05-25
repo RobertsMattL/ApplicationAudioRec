@@ -1,6 +1,19 @@
 import AppKit
 import AVFoundation
 
+/// Table view that reports Delete / Backspace key presses so a selected track
+/// can be removed from the keyboard.
+final class TrackTableView: NSTableView {
+    var onDeleteKey: (() -> Void)?
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 51 || event.keyCode == 117 {   // delete, forward-delete
+            onDeleteKey?()
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+}
+
 /// A small window that lists the MP3s in the recordings folder and plays them
 /// back with transport controls, a seek slider, and a volume slider.
 @MainActor
@@ -23,7 +36,7 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate,
     private var timer: Timer?
 
     // UI
-    private let tableView = NSTableView()
+    private let tableView = TrackTableView()
     private let nowPlayingLabel = NSTextField(labelWithString: "Nothing playing")
     private let elapsedLabel = NSTextField(labelWithString: "0:00")
     private let totalLabel = NSTextField(labelWithString: "0:00")
@@ -32,6 +45,9 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate,
     private let prevButton = NSButton()
     private let playPauseButton = NSButton()
     private let nextButton = NSButton()
+    private let renameButton = NSButton()
+    private let deleteButton = NSButton()
+    private let revealButton = NSButton()
 
     // MARK: - Init
 
@@ -128,10 +144,12 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate,
 
         // --- Footer ---
         let refreshButton = NSButton(title: "Refresh", target: self, action: #selector(refresh))
-        let revealButton = NSButton(title: "Show in Finder", target: self, action: #selector(revealInFinder))
         refreshButton.bezelStyle = .rounded
-        revealButton.bezelStyle = .rounded
-        let footerRow = NSStackView(views: [refreshButton, flexibleSpace(), revealButton])
+        configureFooterButton(revealButton, title: "Show in Finder", action: #selector(revealButtonClicked))
+        configureFooterButton(renameButton, title: "Rename…", action: #selector(renameButtonClicked))
+        configureFooterButton(deleteButton, title: "Delete", action: #selector(deleteButtonClicked))
+        let footerRow = NSStackView(views: [refreshButton, revealButton,
+                                            flexibleSpace(), renameButton, deleteButton])
 
         // --- Bottom container ---
         let bottom = NSStackView(views: [nowPlayingLabel, seekRow, controlsRow, footerRow])
@@ -157,7 +175,31 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate,
             bottom.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
 
+        // --- Right-click context menu + Delete key ---
+        let rowMenu = NSMenu()
+        rowMenu.addItem(withTitle: "Play", action: #selector(playMenuClicked), keyEquivalent: "")
+        rowMenu.addItem(.separator())
+        rowMenu.addItem(withTitle: "Rename…", action: #selector(renameMenuClicked), keyEquivalent: "")
+        rowMenu.addItem(withTitle: "Show in Finder", action: #selector(revealMenuClicked), keyEquivalent: "")
+        rowMenu.addItem(.separator())
+        rowMenu.addItem(withTitle: "Move to Trash", action: #selector(deleteMenuClicked), keyEquivalent: "")
+        rowMenu.items.forEach { $0.target = self }
+        tableView.menu = rowMenu
+        tableView.onDeleteKey = { [weak self] in
+            guard let self else { return }
+            let row = self.tableView.selectedRow
+            if row >= 0 { self.delete(at: row) }
+        }
+
         updateTransportEnabled()
+        updateButtonsEnabled()
+    }
+
+    private func configureFooterButton(_ button: NSButton, title: String, action: Selector) {
+        button.title = title
+        button.bezelStyle = .rounded
+        button.target = self
+        button.action = action
     }
 
     private func configureTransport(_ button: NSButton, symbol: String, action: Selector) {
@@ -200,6 +242,7 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate,
         tableView.reloadData()
         computeMissingDurations()
         updateTransportEnabled()
+        updateButtonsEnabled()
     }
 
     private func modDate(_ url: URL) -> Date {
@@ -303,12 +346,120 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate,
         player?.volume = Float(volumeSlider.doubleValue)
     }
 
-    @objc private func revealInFinder() {
-        if let i = currentIndex {
+    // MARK: - Rename / delete / reveal
+
+    // Footer buttons act on the selected row; context-menu items act on the
+    // right-clicked row. Both rename/delete bounds-check the index themselves.
+    @objc private func renameButtonClicked() { rename(at: tableView.selectedRow) }
+    @objc private func deleteButtonClicked() { delete(at: tableView.selectedRow) }
+    @objc private func revealButtonClicked() { reveal(at: tableView.selectedRow) }
+    @objc private func renameMenuClicked()   { rename(at: tableView.clickedRow) }
+    @objc private func deleteMenuClicked()   { delete(at: tableView.clickedRow) }
+    @objc private func revealMenuClicked()   { reveal(at: tableView.clickedRow) }
+    @objc private func playMenuClicked() {
+        let row = tableView.clickedRow
+        if row >= 0 { play(at: row) }
+    }
+
+    private func reveal(at index: Int) {
+        if tracks.indices.contains(index) {
+            NSWorkspace.shared.activateFileViewerSelecting([tracks[index].url])
+        } else if let i = currentIndex {
             NSWorkspace.shared.activateFileViewerSelecting([tracks[i].url])
         } else {
             NSWorkspace.shared.open(folder)
         }
+    }
+
+    private func rename(at index: Int) {
+        guard tracks.indices.contains(index) else { return }
+        let url = tracks[index].url
+        let ext = url.pathExtension
+
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.stringValue = url.deletingPathExtension().lastPathComponent
+
+        let alert = NSAlert()
+        alert.messageText = "Rename Recording"
+        alert.informativeText = "Enter a new name:"
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let base = field.stringValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        guard !base.isEmpty else { return }
+
+        let newName = ext.isEmpty ? base : "\(base).\(ext)"
+        let dest = url.deletingLastPathComponent().appendingPathComponent(newName)
+        guard dest != url else { return }
+        if FileManager.default.fileExists(atPath: dest.path) {
+            showError("A file named “\(newName)” already exists.")
+            return
+        }
+
+        do {
+            // Renaming keeps the same inode, so an actively-playing track keeps
+            // playing from its open file handle.
+            try FileManager.default.moveItem(at: url, to: dest)
+            tracks[index] = Track(url: dest, duration: tracks[index].duration)
+            if currentIndex == index {
+                nowPlayingLabel.stringValue = dest.deletingPathExtension().lastPathComponent
+            }
+            tableView.reloadData(forRowIndexes: IndexSet(integer: index),
+                                 columnIndexes: IndexSet(integer: 0))
+        } catch {
+            showError("Couldn't rename the file.\n\n\(error.localizedDescription)")
+        }
+    }
+
+    private func delete(at index: Int) {
+        guard tracks.indices.contains(index) else { return }
+        let url = tracks[index].url
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Move “\(url.lastPathComponent)” to the Trash?"
+        alert.informativeText = "You can restore it from the Trash later."
+        alert.addButton(withTitle: "Move to Trash")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        // Stop playback before deleting the track that's currently playing.
+        if currentIndex == index {
+            player?.stop()
+            player = nil
+            stopTimer()
+            currentIndex = nil
+            nowPlayingLabel.stringValue = "Nothing playing"
+            positionSlider.doubleValue = 0
+            elapsedLabel.stringValue = Self.formatTime(0)
+            totalLabel.stringValue = Self.formatTime(0)
+            updatePlayPauseIcon()
+        }
+
+        do {
+            try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+        } catch {
+            showError("Couldn't move the file to the Trash.\n\n\(error.localizedDescription)")
+            return
+        }
+
+        tracks.remove(at: index)
+        if let i = currentIndex, i > index { currentIndex = i - 1 }
+        tableView.reloadData()
+        updateTransportEnabled()
+        updateButtonsEnabled()
+    }
+
+    private func showError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.runModal()
     }
 
     // MARK: - Timer
@@ -346,6 +497,13 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate,
         [prevButton, playPauseButton, nextButton].forEach { $0.isEnabled = hasTracks }
     }
 
+    private func updateButtonsEnabled() {
+        let hasSelection = tableView.selectedRow >= 0
+        renameButton.isEnabled = hasSelection
+        deleteButton.isEnabled = hasSelection
+        revealButton.isEnabled = hasSelection || currentIndex != nil
+    }
+
     static func formatTime(_ t: TimeInterval) -> String {
         guard t.isFinite, t >= 0 else { return "0:00" }
         let s = Int(t.rounded())
@@ -355,6 +513,10 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate,
     // MARK: - NSTableViewDataSource / Delegate
 
     func numberOfRows(in tableView: NSTableView) -> Int { tracks.count }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        updateButtonsEnabled()
+    }
 
     func tableView(_ tableView: NSTableView,
                    viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
